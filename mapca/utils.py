@@ -4,6 +4,7 @@ PCA based on Moving Average (stationary Gaussian) process
 import logging
 
 import numpy as np
+from nilearn import image
 from scipy.fftpack import fftn, fftshift
 from scipy.linalg import svd
 from scipy.signal import fftconvolve
@@ -179,7 +180,7 @@ def _est_indp_sp(data):
     return n_iters, ent_rate
 
 
-def _subsampling(data, sub_depth):
+def _subsampling(img, sub_depth):
     """
     Subsampling the data evenly with space 'sub_depth'.
 
@@ -195,10 +196,23 @@ def _subsampling(data, sub_depth):
     out : ndarray
         Subsampled data
     """
+    if isinstance(img, np.ndarray):
+        slices = [slice(None, None, sub_depth)] * img.ndim
+        subsampled_img = img[tuple(slices)]
+    else:
+        target_affine = img.affine.copy()
+        target_shape = np.ceil(np.array(img.shape[:3]) / sub_depth).astype(int)
+        diag = np.diag(target_affine).copy()
+        diag[:3] *= sub_depth
+        np.fill_diagonal(target_affine, diag)
 
-    slices = [slice(None, None, sub_depth)] * data.ndim
-    out = data[tuple(slices)]
-    return out
+        subsampled_img = image.resample_img(
+            img,
+            target_affine=target_affine,
+            target_shape=target_shape,
+            interpolation="nearest"
+        )
+    return subsampled_img
 
 
 def _kurtn(data):

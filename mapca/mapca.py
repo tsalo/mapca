@@ -129,14 +129,12 @@ class MovingAveragePCA:
 
         # Estimate the subsampling depth for effectively i.i.d. samples
         LGR.info("Estimating the subsampling depth for effective i.i.d samples...")
-        mask_ND = mask.get_fdata()
-        sub_depth = len(idx)
-        sub_iid_sp = np.zeros((sub_depth,))
-        for i in range(sub_depth):
-            x_single = masking.unmask(data_2d[idx[i], :]).get_fdata()
-            sub_iid_sp[i] = utils._est_indp_sp(x_single)[0] + 1
-            if i > 6:
-                tmp_sub_sp = sub_iid_sp[0:i]
+        sub_iid_sp = np.zeros(len(idx))
+        for i_idx, idx_val in enumerate(idx):
+            x_single = masking.unmask(data_2d[idx_val, :], mask).get_fdata()
+            sub_iid_sp[i_idx] = utils._est_indp_sp(x_single)[0] + 1
+            if i_idx > 6:
+                tmp_sub_sp = sub_iid_sp[0:i_idx]
                 tmp_sub_median = np.round(np.median(tmp_sub_sp))
                 if np.sum(tmp_sub_sp == tmp_sub_median) > 6:
                     sub_iid_sp = tmp_sub_sp
@@ -149,25 +147,18 @@ class MovingAveragePCA:
         N = np.round(n_voxels_in_mask / np.power(sub_iid_sp_median, dim_n))
 
         if sub_iid_sp_median != 1:
-            mask_s = utils._subsampling(mask_ND, sub_iid_sp_median)
-            mask_s_1d = np.reshape(mask_s, np.prod(mask_s.shape), order="F")
-            dat = np.zeros((int(np.sum(mask_s_1d)), n_t))
-            LGR.info("Generating subsampled i.i.d. data...")
-            for i_vol in range(n_t):
-                x_single = masking.unmask(data_2d[i_vol, :]).get_fdata()
-
-                dat0 = utils._subsampling(x_single, sub_iid_sp_median)
-                dat0 = np.reshape(dat0, np.prod(dat0.shape), order="F")
-                dat[:, i_vol] = dat0[mask_s_1d == 1]
+            mask_subsampled = utils._subsampling(mask, sub_iid_sp_median)
+            img_subsampled = utils._subsampling(img, sub_iid_sp_median)
+            dat = masking.apply_mask(img_subsampled, mask_subsampled)  # T x S
 
             # Perform Variance Normalization
             # scaler = StandardScaler(with_mean=True, with_std=True)
-            dat = self.scaler_.fit_transform(dat.T).T
+            dat = self.scaler_.fit_transform(dat)
             # data = ((dat.T - dat.T.mean(axis=0)) / dat.T.std(axis=0)).T
 
             # (completed)
             LGR.info("Performing SVD on subsampled i.i.d. data...")
-            V, eigenvalues = utils._icatb_svd(dat, n_t)
+            V, eigenvalues = utils._icatb_svd(dat.T, n_t)
             LGR.info("SVD done on subsampled i.i.d. data")
             eigenvalues = eigenvalues[::-1]
 
@@ -233,7 +224,12 @@ class MovingAveragePCA:
         self.n_features_ = ppca.n_features_
         self.n_samples_ = ppca.n_samples_
         self.noise_variance_ = ppca.noise_variance_
-        self.u = np.dot(np.dot(data_2d, self.components_.T), np.diag(1.0 / self.explained_variance_))
+        self.u = np.dot(
+            np.dot(data_2d, self.components_.T),
+            np.diag(1.0 / self.explained_variance_)
+        )
+        raise Exception(self.u.shape)
+        self.u_img = masking.unmask(self.u, mask)
 
     def fit(self, img, mask):
         """Fit the model with X.
@@ -295,31 +291,33 @@ class MovingAveragePCA:
         """
         # X = self.scaler_.fit_transform(X.T).T
         # X_new = np.dot(np.dot(X, self.components_.T), np.diag(1.0 / self.explained_variance_))
-        return self.u
+        return self.u_img
 
-    def inverse_transform(self, X):
+    def inverse_transform(self, img, mask):
         """Transform data back to its original space.
 
         In other words, return an input X_original whose transform would be X.
 
         Parameters
         ----------
-        X : array-like, shape (n_voxels_in_mask, n_components)
-            New data, where n_voxels_in_mask is the number of samples and n_components
-            is the number of components.
+        img : 4D img_like
+            Component maps
 
         Returns
         -------
-        X_original : array-like, shape (n_voxels_in_mask, n_features)
+        img_original : 4D img_like
+            Reconstructed 4D time series data
 
         Notes
         -----
         This is different from scikit-learn's approach, which ignores explained variance.
         """
-        X_orig = np.dot(np.dot(X, np.diag(self.explained_variance_)), self.components_)
+        data_2d = masking.apply_mask(img, mask)
+        X_orig = np.dot(np.dot(data_2d, np.diag(self.explained_variance_)), self.components_)
         if self.normalize:
             X_orig = self.scaler_.inverse_transform(X_orig.T).T
-        return X_orig
+        img_original = masking.unmask(X_orig, mask)
+        return img_original
 
 
 def ma_pca(img, mask_img, criterion="mdl", normalize=False):
