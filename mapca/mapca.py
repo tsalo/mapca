@@ -57,7 +57,7 @@ class MovingAveragePCA:
         When n_components is set to ‘mle’ or a number between 0 and 1
         (with svd_solver == ‘full’) this number is estimated from input data.
         Otherwise it equals the parameter n_components, or the lesser value of
-        n_features and n_samples if n_components is None.
+        n_features and n_voxels_in_mask if n_components is None.
     n_features_ : int
         Number of features in the training data.
     n_samples_ : int
@@ -69,7 +69,7 @@ class MovingAveragePCA:
         or http://www.miketipping.com/papers/met-mppca.pdf.
         It is required to compute the estimated data covariance and score samples.
 
-        Equal to the average of (min(n_features, n_samples) - n_components) smallest
+        Equal to the average of (min(n_features, n_voxels_in_mask) - n_components) smallest
         eigenvalues of the covariance matrix of X.
     """
 
@@ -77,23 +77,28 @@ class MovingAveragePCA:
         self.criterion = criterion
         self.normalize = normalize
 
-    def _fit(self, X, shape_3d, mask_vec):
-        n_x, n_y, n_z = shape_3d
-        n_samples, n_timepoints = X.shape
+    def _fit(self, img, mask):
+        data = img.get_fdata()
+        mask_data = mask.get_fdata()
+        [n_x, n_y, n_z, n_t] = data.shape
+        data_2d = np.reshape(data, (n_x * n_y * n_z, n_t), order='F')
+        mask_vec = np.reshape(mask_data, n_x * n_y * n_z, order='F')
+        data = data_2d[mask_vec == 1, :]
+        n_voxels_in_mask = np.sum(mask_data)
 
         self.scaler_ = StandardScaler(with_mean=True, with_std=True)
         if self.normalize:
             # TODO: determine if tedana is already normalizing before this
-            X = self.scaler_.fit_transform(X.T).T  # This was X_sc
-            # X = ((X.T - X.T.mean(axis=0)) / X.T.std(axis=0)).T
+            data_2d = self.scaler_.fit_transform(data_2d.T).T  # This was X_sc
+            # data_2d = ((data_2d.T - data_2d.T.mean(axis=0)) / data_2d.T.std(axis=0)).T
 
         LGR.info("Performing SVD on original data...")
-        V, eigenvalues = utils._icatb_svd(X, n_timepoints)
+        V, eigenvalues = utils._icatb_svd(data_2d, n_t)
         LGR.info("SVD done on original data")
 
         # Reordering of values
         eigenvalues = eigenvalues[::-1]
-        dataN = np.dot(X, V[:, ::-1])
+        dataN = np.dot(data_2d, V[:, ::-1])
         # Potentially the small differences come from the different signs on V
 
         # Using 12 gaussian components from middle, top and bottom gaussian
@@ -141,18 +146,18 @@ class MovingAveragePCA:
             dim_n = x_single.ndim
 
         sub_iid_sp_median = int(np.round(np.median(sub_iid_sp)))
-        if np.floor(np.power(n_samples / n_timepoints, 1 / dim_n)) < sub_iid_sp_median:
-            sub_iid_sp_median = int(np.floor(np.power(n_samples / n_timepoints, 1 / dim_n)))
-        N = np.round(n_samples / np.power(sub_iid_sp_median, dim_n))
+        if np.floor(np.power(n_voxels_in_mask / n_t, 1 / dim_n)) < sub_iid_sp_median:
+            sub_iid_sp_median = int(np.floor(np.power(n_voxels_in_mask / n_t, 1 / dim_n)))
+        N = np.round(n_voxels_in_mask / np.power(sub_iid_sp_median, dim_n))
 
         if sub_iid_sp_median != 1:
             mask_s = utils._subsampling(mask_ND, sub_iid_sp_median)
             mask_s_1d = np.reshape(mask_s, np.prod(mask_s.shape), order="F")
-            dat = np.zeros((int(np.sum(mask_s_1d)), n_timepoints))
+            dat = np.zeros((int(np.sum(mask_s_1d)), n_t))
             LGR.info("Generating subsampled i.i.d. data...")
-            for i_vol in range(n_timepoints):
+            for i_vol in range(n_t):
                 x_single = np.zeros(n_x * n_y * n_z)
-                x_single[mask_vec == 1] = X[:, i_vol]
+                x_single[mask_vec == 1] = data_2d[:, i_vol]
                 x_single = np.reshape(x_single, (n_x, n_y, n_z), order="F")
                 dat0 = utils._subsampling(x_single, sub_iid_sp_median)
                 dat0 = np.reshape(dat0, np.prod(dat0.shape), order="F")
@@ -165,7 +170,7 @@ class MovingAveragePCA:
 
             # (completed)
             LGR.info("Performing SVD on subsampled i.i.d. data...")
-            V, eigenvalues = utils._icatb_svd(dat, n_timepoints)
+            V, eigenvalues = utils._icatb_svd(dat, n_t)
             LGR.info("SVD done on subsampled i.i.d. data")
             eigenvalues = eigenvalues[::-1]
 
@@ -186,7 +191,7 @@ class MovingAveragePCA:
             )
 
         LGR.info("Estimating the dimensionality ...")
-        p = n_timepoints
+        p = n_t
         aic = np.zeros(p - 1)
         kic = np.zeros(p - 1)
         mdl = np.zeros(p - 1)
@@ -219,7 +224,7 @@ class MovingAveragePCA:
 
         # PCA with estimated number of components
         ppca = PCA(n_components=n_components, svd_solver="full", copy=False, whiten=False)
-        ppca.fit(X)
+        ppca.fit(data_2d)
 
         # Assign attributes from model
         self.components_ = ppca.components_
@@ -231,15 +236,15 @@ class MovingAveragePCA:
         self.n_features_ = ppca.n_features_
         self.n_samples_ = ppca.n_samples_
         self.noise_variance_ = ppca.noise_variance_
-        self.u = np.dot(np.dot(X, self.components_.T), np.diag(1.0 / self.explained_variance_))
+        self.u = np.dot(np.dot(data_2d, self.components_.T), np.diag(1.0 / self.explained_variance_))
 
-    def fit(self, X, shape_3d, mask_vec):
+    def fit(self, img, mask):
         """Fit the model with X.
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_features)
-            Training data, where n_samples is the number of samples and
+        X : array-like, shape (n_voxels_in_mask, n_features)
+            Training data, where n_voxels_in_mask is the number of samples and
             n_features is the number of features.
 
         Returns
@@ -247,21 +252,21 @@ class MovingAveragePCA:
         self : object
             Returns the instance itself.
         """
-        self._fit(X, shape_3d, mask_vec)
+        self._fit(img, mask)
         return self
 
-    def fit_transform(self, X, shape_3d, mask_vec):
+    def fit_transform(self, img, mask):
         """Fit the model with X and apply the dimensionality reduction on X.
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_features)
-            Training data, where n_samples is the number of samples and
+        X : array-like, shape (n_voxels_in_mask, n_features)
+            Training data, where n_voxels_in_mask is the number of samples and
             n_features is the number of features.
 
         Returns
         -------
-        X_new : array-like, shape (n_samples, n_components)
+        X_new : array-like, shape (n_voxels_in_mask, n_components)
             Transformed values.
 
         Notes
@@ -269,23 +274,23 @@ class MovingAveragePCA:
         The transformation step is different from scikit-learn's approach,
         which ignores explained variance.
         """
-        self._fit(X, shape_3d, mask_vec)
-        return self.transform(X)
+        self._fit(img, mask)
+        return self.transform(img)
 
-    def transform(self, X):
+    def transform(self, img):
         """Apply dimensionality reduction to X.
 
         X is projected on the first principal components previously extracted from a training set.
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_features)
-            New data, where n_samples is the number of samples and n_features
+        X : array-like, shape (n_voxels_in_mask, n_features)
+            New data, where n_voxels_in_mask is the number of samples and n_features
             is the number of features.
 
         Returns
         -------
-        X_new : array-like, shape (n_samples, n_components)
+        X_new : array-like, shape (n_voxels_in_mask, n_components)
 
         Notes
         -----
@@ -302,13 +307,13 @@ class MovingAveragePCA:
 
         Parameters
         ----------
-        X : array-like, shape (n_samples, n_components)
-            New data, where n_samples is the number of samples and n_components
+        X : array-like, shape (n_voxels_in_mask, n_components)
+            New data, where n_voxels_in_mask is the number of samples and n_components
             is the number of components.
 
         Returns
         -------
-        X_original : array-like, shape (n_samples, n_features)
+        X_original : array-like, shape (n_voxels_in_mask, n_features)
 
         Notes
         -----
@@ -345,27 +350,17 @@ def ma_pca(img, mask_img, criterion="mdl", normalize=False):
 
     Returns
     -------
-    u : array-like, shape (n_samples, n_components)
+    u : array-like, shape (n_voxels_in_mask, n_components)
         Component weight map for each component.
     s : array-like, shape (n_components,)
         Variance explained for each component.
     varex_norm : array-like, shape (n_components,)
         Explained variance ratio.
-    v : array-like, shape (n_timepoints, n_components)
+    v : array-like, shape (n_t, n_components)
         Component timeseries.
     """
-    # from nilearn import masking
-
-    # data = masking.apply_mask(img, mask_img).T
-    # mask_vec = np.reshape(mask_img.get_fdata(), np.prod(mask_img.shape), order="F")
-    img = img.get_fdata()
-    mask_img = mask_img.get_fdata()
-    [Nx, Ny, Nz, Nt] = img.shape
-    data_nib_V = np.reshape(img, (Nx * Ny * Nz, Nt), order='F')
-    mask_vec = np.reshape(mask_img, Nx * Ny * Nz, order='F')
-    data = data_nib_V[mask_vec == 1, :]
     pca = MovingAveragePCA(criterion=criterion, normalize=normalize)
-    u = pca.fit_transform(data, shape_3d=img.shape[:3], mask_vec=mask_vec)
+    u = pca.fit_transform(img, mask_img)
     s = pca.explained_variance_
     varex_norm = pca.explained_variance_ratio_
     v = pca.components_.T
