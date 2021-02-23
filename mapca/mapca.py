@@ -83,23 +83,22 @@ class MovingAveragePCA:
         img = check_niimg_4d(img)
         mask = check_niimg_3d(mask)
 
-        data_2d = masking.apply_mask(img, mask)  # T x S
+        data_2d = masking.apply_mask(img, mask)  # T x S, was S x T
         [n_x, n_y, n_z, n_t] = img.shape
         n_voxels_in_mask = data_2d.shape[1]
 
         self.scaler_ = StandardScaler(with_mean=True, with_std=True)
         if self.normalize:
             # TODO: determine if tedana is already normalizing before this
-            data_2d = self.scaler_.fit_transform(data_2d.T).T  # This was X_sc
-            # data_2d = ((data_2d.T - data_2d.T.mean(axis=0)) / data_2d.T.std(axis=0)).T
+            data_2d = self.scaler_.fit_transform(data_2d)  # This was X_sc
 
         LGR.info("Performing SVD on original data...")
-        V, eigenvalues = utils._icatb_svd(data_2d, n_t)
+        V, eigenvalues = utils._icatb_svd(data_2d.T, n_t)
         LGR.info("SVD done on original data")
 
         # Reordering of values
         eigenvalues = eigenvalues[::-1]
-        dataN = np.dot(data_2d, V[:, ::-1])
+        dataN = np.dot(data_2d.T, V[:, ::-1])  # S x C
         # Potentially the small differences come from the different signs on V
 
         # Using 12 gaussian components from middle, top and bottom gaussian
