@@ -3,6 +3,8 @@
 import logging
 
 import numpy as np
+from nilearn import masking
+from nilearn._utils import check_niimg_3d, check_niimg_4d
 from scipy.stats import kurtosis
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -78,13 +80,12 @@ class MovingAveragePCA:
         self.normalize = normalize
 
     def _fit(self, img, mask):
-        data = img.get_fdata()
-        mask_data = mask.get_fdata()
-        [n_x, n_y, n_z, n_t] = data.shape
-        data_2d = np.reshape(data, (n_x * n_y * n_z, n_t), order='F')
-        mask_vec = np.reshape(mask_data, n_x * n_y * n_z, order='F')
-        data = data_2d[mask_vec == 1, :]
-        n_voxels_in_mask = np.sum(mask_data)
+        img = check_niimg_4d(img)
+        mask = check_niimg_3d(mask)
+
+        data_2d = masking.apply_mask(img, mask)  # T x S
+        [n_x, n_y, n_z, n_t] = img.shape
+        n_voxels_in_mask = data_2d.shape[1]
 
         self.scaler_ = StandardScaler(with_mean=True, with_std=True)
         if self.normalize:
@@ -129,13 +130,11 @@ class MovingAveragePCA:
 
         # Estimate the subsampling depth for effectively i.i.d. samples
         LGR.info("Estimating the subsampling depth for effective i.i.d samples...")
-        mask_ND = np.reshape(mask_vec, (n_x, n_y, n_z), order="F")
+        mask_ND = mask.get_fdata()
         sub_depth = len(idx)
         sub_iid_sp = np.zeros((sub_depth,))
         for i in range(sub_depth):
-            x_single = np.zeros(n_x * n_y * n_z)
-            x_single[mask_vec == 1] = dataN[:, idx[i]]
-            x_single = np.reshape(x_single, (n_x, n_y, n_z), order="F")
+            x_single = masking.unmask(data_2d[idx[i], :]).get_fdata()
             sub_iid_sp[i] = utils._est_indp_sp(x_single)[0] + 1
             if i > 6:
                 tmp_sub_sp = sub_iid_sp[0:i]
@@ -156,9 +155,8 @@ class MovingAveragePCA:
             dat = np.zeros((int(np.sum(mask_s_1d)), n_t))
             LGR.info("Generating subsampled i.i.d. data...")
             for i_vol in range(n_t):
-                x_single = np.zeros(n_x * n_y * n_z)
-                x_single[mask_vec == 1] = data_2d[:, i_vol]
-                x_single = np.reshape(x_single, (n_x, n_y, n_z), order="F")
+                x_single = masking.unmask(data_2d[i_vol, :]).get_fdata()
+
                 dat0 = utils._subsampling(x_single, sub_iid_sp_median)
                 dat0 = np.reshape(dat0, np.prod(dat0.shape), order="F")
                 dat[:, i_vol] = dat0[mask_s_1d == 1]
